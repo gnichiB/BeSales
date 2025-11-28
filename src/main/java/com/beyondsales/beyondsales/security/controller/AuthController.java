@@ -3,22 +3,26 @@ package com.beyondsales.beyondsales.security.controller;
 import com.beyondsales.beyondsales.security.jwt.JwtUtils;
 import com.beyondsales.beyondsales.security.payload.request.LoginRequest;
 import com.beyondsales.beyondsales.security.payload.request.SignupRequest;
+import com.beyondsales.beyondsales.security.payload.response.ApiResponse;
 import com.beyondsales.beyondsales.security.payload.response.JwtResponse;
-import com.beyondsales.beyondsales.security.payload.response.MessageResponse;
 import com.beyondsales.beyondsales.entity.Role;
 import com.beyondsales.beyondsales.entity.User;
 import com.beyondsales.beyondsales.repository.RoleRepository;
 import com.beyondsales.beyondsales.repository.UserRepository;
-import org.springframework.security.authentication.AuthenticationManager;
-import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import com.beyondsales.beyondsales.security.userdetails.CustomUserDetails;
+import com.beyondsales.beyondsales.security.exception.RoleNotFoundException;
+import jakarta.validation.Valid;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.authentication.*;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.time.Instant;
+import java.util.*;
 import java.util.stream.Collectors;
 
 @RestController
@@ -31,12 +35,12 @@ public class AuthController {
     private final PasswordEncoder passwordEncoder;
     private final JwtUtils jwtUtils;
 
-    public AuthController(AuthenticationManager authenticationManager,
+    public AuthController(AuthenticationConfiguration authConfig,
                           UserRepository userRepository,
                           RoleRepository roleRepository,
                           PasswordEncoder passwordEncoder,
-                          JwtUtils jwtUtils) {
-        this.authenticationManager = authenticationManager;
+                          JwtUtils jwtUtils) throws Exception {
+        this.authenticationManager = authConfig.getAuthenticationManager();
         this.userRepository = userRepository;
         this.roleRepository = roleRepository;
         this.passwordEncoder = passwordEncoder;
@@ -44,60 +48,86 @@ public class AuthController {
     }
 
     @PostMapping("/signin")
-    public JwtResponse authenticateUser(@RequestBody LoginRequest loginRequest) {
+    public ResponseEntity<ApiResponse<JwtResponse>> authenticateUser(@Valid @RequestBody LoginRequest loginRequest) {
 
-        Authentication authentication = authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(
-                        loginRequest.getUsername(),
-                        loginRequest.getPassword()
-                )
-        );
+        Authentication authentication;
+        try {
+            authentication = authenticationManager.authenticate(
+                    new UsernamePasswordAuthenticationToken(
+                            loginRequest.getUsername(),
+                            loginRequest.getPassword()
+                    )
+            );
+        } catch (BadCredentialsException ex) {
+            return ResponseEntity
+                    .status(401)
+                    .body(ApiResponse.failure("INVALID_CREDENTIALS", "Identifiants invalides"));
+        } catch (DisabledException ex) {
+            return ResponseEntity
+                    .status(403)
+                    .body(ApiResponse.failure("USER_DISABLED", "Compte désactivé"));
+        } catch (LockedException ex) {
+            return ResponseEntity
+                    .status(423)
+                    .body(ApiResponse.failure("USER_LOCKED", "Compte verrouillé"));
+        }
 
         SecurityContextHolder.getContext().setAuthentication(authentication);
-        String jwt = jwtUtils.generateJwtToken(authentication.getName());
 
-        var userDetails = (org.springframework.security.core.userdetails.User) authentication.getPrincipal();
+        CustomUserDetails userDetails = (CustomUserDetails) authentication.getPrincipal();
+
+        String accessToken = jwtUtils.generateAccessToken(userDetails);
+        String refreshToken = jwtUtils.generateRefreshToken(userDetails); // optionnel
+
         List<String> roles = userDetails.getAuthorities().stream()
-                .map(item -> item.getAuthority())
+                .map(a -> a.getAuthority())
                 .collect(Collectors.toList());
 
-        return new JwtResponse(jwt, userDetails.getUsername(), roles);
+        JwtResponse payload = new JwtResponse(accessToken, refreshToken, userDetails.getId(), userDetails.getUsername(), roles);
+
+        return ResponseEntity.ok(ApiResponse.success(payload));
     }
 
     @PostMapping("/signup")
-    public MessageResponse registerUser(@RequestBody SignupRequest signUpRequest) {
+    public ResponseEntity<ApiResponse<Void>> registerUser(@Valid @RequestBody SignupRequest signUpRequest) {
 
         if (userRepository.existsByUsername(signUpRequest.getUsername())) {
-            return new MessageResponse("Erreur: Nom d'utilisateur déjà utilisé!");
+            return ResponseEntity
+                    .badRequest()
+                    .body(ApiResponse.failure("USERNAME_ALREADY_EXISTS", "Le nom d'utilisateur est déjà utilisé"));
         }
 
         if (userRepository.existsByEmail(signUpRequest.getEmail())) {
-            return new MessageResponse("Erreur: Email déjà utilisé!");
+            return ResponseEntity
+                    .badRequest()
+                    .body(ApiResponse.failure("EMAIL_ALREADY_EXISTS", "L'email est déjà utilisé"));
         }
 
-        // Création utilisateur
-        User user = new User(signUpRequest.getUsername(),
-                passwordEncoder.encode(signUpRequest.getPassword()),
-                signUpRequest.getEmail());
+        // création utilisateur
+        User user = new User();
+        user.setUsername(signUpRequest.getUsername());
+        user.setPassword(passwordEncoder.encode(signUpRequest.getPassword()));
+        user.setEmail(signUpRequest.getEmail());
+        user.setCreatedAt(Instant.now());
 
-        Set<String> strRoles = signUpRequest.getRoles();
+        Set<String> strRoles = Optional.ofNullable(signUpRequest.getRoles()).orElse(Set.of("ROLE_USER"));
         Set<Role> roles = new HashSet<>();
 
-        if (strRoles == null) {
-            Role userRole = roleRepository.findByName("ROLE_USER")
-                    .orElseThrow(() -> new RuntimeException("Erreur: Role non trouvé."));
-            roles.add(userRole);
-        } else {
-            strRoles.forEach(role -> {
-                Role foundRole = roleRepository.findByName(role)
-                        .orElseThrow(() -> new RuntimeException("Erreur: Role non trouvé."));
-                roles.add(foundRole);
-            });
+        for (String r : strRoles) {
+            Role role = roleRepository.findByName(r)
+                    .orElseThrow(() -> new RoleNotFoundException("Role non trouvé: " + r));
+            roles.add(role);
+        }
+        user.setRoles(roles);
+
+        try {
+            userRepository.save(user);
+        } catch (DataIntegrityViolationException ex) {
+            return ResponseEntity
+                    .status(500)
+                    .body(ApiResponse.failure("PERSISTENCE_ERROR", "Erreur lors de la sauvegarde de l'utilisateur"));
         }
 
-        user.setRoles(roles);
-        userRepository.save(user);
-
-        return new MessageResponse("Utilisateur enregistré avec succès!");
+        return ResponseEntity.ok(ApiResponse.successMessage("Utilisateur enregistré avec succès"));
     }
 }

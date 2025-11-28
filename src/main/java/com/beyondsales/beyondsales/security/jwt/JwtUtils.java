@@ -13,13 +13,13 @@ import java.util.Date;
 public class JwtUtils {
 
     @Value("${jwt.secret:beyondsalesSecretKeyForJwtMustBeLongEnough123!}")
-    private String jwtSecret; // ✅ Correction: utiliser jwtSecret partout
+    private String jwtSecret;
 
     @Value("${jwt.expiration:86400000}")
-    private int jwtExpirationMs; // ✅ Externaliser l'expiration aussi
+    private int jwtExpirationMs;
 
     private Key getSigningKey() {
-        return Keys.hmacShaKeyFor(jwtSecret.getBytes()); // ✅ Correction: jwtSecret au lieu de jwtSecret
+        return Keys.hmacShaKeyFor(jwtSecret.getBytes());
     }
 
     public String generateJwtToken(String username) {
