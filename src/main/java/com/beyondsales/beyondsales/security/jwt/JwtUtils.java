@@ -2,6 +2,7 @@ package com.beyondsales.beyondsales.security.jwt;
 
 import io.jsonwebtoken.*;
 import io.jsonwebtoken.security.Keys;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import jakarta.servlet.http.HttpServletRequest;
@@ -11,18 +12,21 @@ import java.util.Date;
 @Component
 public class JwtUtils {
 
-    private final String jwtSecret = "beyondsalesSecretKeyForJwtMustBeLongEnough123!";
-    private final int jwtExpirationMs = 86400000; // 1 day
+    @Value("${jwt.secret:beyondsalesSecretKeyForJwtMustBeLongEnough123!}")
+    private String jwtSecret; // ✅ Correction: utiliser jwtSecret partout
+
+    @Value("${jwt.expiration:86400000}")
+    private int jwtExpirationMs; // ✅ Externaliser l'expiration aussi
 
     private Key getSigningKey() {
-        return Keys.hmacShaKeyFor(jwtSecret.getBytes());
+        return Keys.hmacShaKeyFor(jwtSecret.getBytes()); // ✅ Correction: jwtSecret au lieu de jwtSecret
     }
 
     public String generateJwtToken(String username) {
         return Jwts.builder()
                 .setSubject(username)
                 .setIssuedAt(new Date())
-                .setExpiration(new Date(System.currentTimeMillis() + jwtExpirationMs))
+                .setExpiration(new Date(System.currentTimeMillis() + jwtExpirationMs)) // ✅ Utiliser la variable injectée
                 .signWith(getSigningKey(), SignatureAlgorithm.HS256)
                 .compact();
     }
