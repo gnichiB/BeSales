@@ -3,12 +3,16 @@ package com.beyondsales.beyondsales.security.controller;
 import com.beyondsales.beyondsales.security.jwt.JwtUtils;
 import com.beyondsales.beyondsales.security.payload.request.LoginRequest;
 import com.beyondsales.beyondsales.security.payload.request.SignupRequest;
+import com.beyondsales.beyondsales.security.payload.request.TokenRefreshRequest;
 import com.beyondsales.beyondsales.security.payload.response.JwtResponse;
 import com.beyondsales.beyondsales.security.payload.response.MessageResponse;
+import com.beyondsales.beyondsales.security.payload.response.TokenRefreshResponse;
 import com.beyondsales.beyondsales.entity.Role;
+import com.beyondsales.beyondsales.entity.RefreshToken;
 import com.beyondsales.beyondsales.entity.User;
 import com.beyondsales.beyondsales.repository.RoleRepository;
 import com.beyondsales.beyondsales.repository.UserRepository;
+import com.beyondsales.beyondsales.service.RefreshTokenService;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
@@ -30,17 +34,20 @@ public class AuthController {
     private final RoleRepository roleRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtUtils jwtUtils;
+    private final RefreshTokenService refreshTokenService;
 
     public AuthController(AuthenticationManager authenticationManager,
                           UserRepository userRepository,
                           RoleRepository roleRepository,
                           PasswordEncoder passwordEncoder,
-                          JwtUtils jwtUtils) {
+                          JwtUtils jwtUtils,
+                          RefreshTokenService refreshTokenService) {
         this.authenticationManager = authenticationManager;
         this.userRepository = userRepository;
         this.roleRepository = roleRepository;
         this.passwordEncoder = passwordEncoder;
         this.jwtUtils = jwtUtils;
+        this.refreshTokenService = refreshTokenService;
     }
 
     @PostMapping("/signin")
@@ -48,8 +55,8 @@ public class AuthController {
 
         Authentication authentication = authenticationManager.authenticate(
                 new UsernamePasswordAuthenticationToken(
-                        loginRequest.getUsername(),
-                        loginRequest.getPassword()
+                        loginRequest.username(),
+                        loginRequest.password()
                 )
         );
 
@@ -61,7 +68,14 @@ public class AuthController {
                 .map(item -> item.getAuthority())
                 .collect(Collectors.toList());
 
-        return new JwtResponse(jwt, userDetails.getUsername(), roles);
+        // Récupérer l'utilisateur pour fournir l'id attendu par JwtResponse
+        User user = userRepository.findByUsername(userDetails.getUsername())
+                .orElseThrow(() -> new RuntimeException("Erreur: utilisateur non trouvé."));
+
+        // Créer et stocker un refresh token (la méthode renvoie le token brut à retourner au client)
+        String refreshToken = refreshTokenService.createRefreshTokenForUser(user);
+
+        return new JwtResponse(jwt, refreshToken, user.getId(), user.getUsername(), roles);
     }
 
     @PostMapping("/signup")
@@ -99,5 +113,25 @@ public class AuthController {
         userRepository.save(user);
 
         return new MessageResponse("Utilisateur enregistré avec succès!");
+    }
+
+    @PostMapping("/refreshtoken")
+    public TokenRefreshResponse refreshToken(@RequestBody TokenRefreshRequest request) {
+        String requestRefreshToken = request.refreshToken();
+
+        RefreshToken refreshToken = refreshTokenService.findByToken(requestRefreshToken)
+                .orElseThrow(() -> new RuntimeException("Refresh token not found"));
+
+        // vérification d'expiration (lance TokenRefreshException si expiré)
+        refreshTokenService.verifyExpiration(refreshToken);
+
+        User user = refreshToken.getUser();
+        String newAccessToken = jwtUtils.generateJwtToken(user.getUsername());
+
+        // Rotation: supprimer l'ancien refresh token et en créer un nouveau
+        refreshTokenService.deleteByUserId(user.getId());
+        String newRefreshToken = refreshTokenService.createRefreshTokenForUser(user);
+
+        return new TokenRefreshResponse(newAccessToken, newRefreshToken);
     }
 }
